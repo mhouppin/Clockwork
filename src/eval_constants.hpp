@@ -4,6 +4,9 @@
 
 namespace Clockwork {
 
+constexpr Score SCORE_DRAW = 0;
+constexpr Score SCORE_VICTORY = 10000;
+
 // clang-format off
 inline const PParam PAWN_MAT   = S(293, 314);
 inline const PParam KNIGHT_MAT = S(1136, 911);

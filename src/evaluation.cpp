@@ -3,8 +3,10 @@
 #include "common.hpp"
 #include "eval_constants.hpp"
 #include "eval_types.hpp"
+#include "movegen.hpp"
 #include "position.hpp"
 #include "psqt_state.hpp"
+#include "see.hpp"
 #include "square.hpp"
 #include <array>
 #include <ranges>
@@ -15,6 +17,79 @@ static i32 chebyshev_distance(Square a, Square b) {
     i32 file_dist = std::abs(a.file() - b.file());
     i32 rank_dist = std::abs(a.rank() - b.rank());
     return std::max(file_dist, rank_dist);
+}
+
+static Score corner_bonus(Square sq) {
+    const i32 f = sq.file();
+    const i32 r = sq.rank();
+    const i32 f4 = std::min(f, f ^ 0b111);
+    const i32 r4 = std::min(r, r ^ 0b111);
+    return Score(36) - Score(2 * (f4 * f4 + r4 * r4));
+}
+
+static Score proximity_bonus(Square sq1, Square sq2) {
+    return Score(70) - Score(10 * chebyshev_distance(sq1, sq2));
+}
+
+static bool opposite_colored_bishops(const Position& pos) {
+    Bitboard bishops = pos.board().bitboard_for(PieceType::Bishop);
+
+    return !(bishops & Bitboard::squares_of_color(Color::White)).empty()
+        && !(bishops & Bitboard::squares_of_color(Color::Black)).empty();
+}
+
+template<Color color>
+bool is_kxk_endgame(const Position& pos) {
+    return (pos.piece_count(~color) == 1) && (
+            pos.piece_count<PieceType::Rook, PieceType::Queen>(color) >= 1
+         || pos.piece_count<PieceType::Bishop, PieceType::Knight>(color) >= 2
+    );
+}
+
+template<Color color>
+Score evaluate_kxk(const Position& pos) {
+    // Don't stalemate the lone king.
+    if (pos.active_color() != color && !pos.is_in_check()) {
+        MoveGen movegen { pos };
+        MoveList noisy, quiet;
+
+        movegen.generate_moves(noisy, quiet);
+
+        // NOTE: could be simplified by making movegen.is_legal_king_move() public,
+        // allowing us to remove both movelists.
+        if (noisy.size() == 0 && quiet.size() == 0) {
+            return SCORE_DRAW;
+        }
+    }
+
+    const Square strong_king = pos.king_sq(color);
+    const Square weak_king = pos.king_sq(~color);
+    const PieceMask pawns = pos.get_piece_mask(color, PieceType::Pawn);
+    const PieceMask knights = pos.get_piece_mask(color, PieceType::Knight);
+    const PieceMask bishops = pos.get_piece_mask(color, PieceType::Bishop);
+    const PieceMask rooks = pos.get_piece_mask(color, PieceType::Rook);
+    const PieceMask queens = pos.get_piece_mask(color, PieceType::Queen);
+
+    // NOTE: ideally we would keep track of both material distributions for both sides in the board
+    // state. This would be very useful for implementing other endgame related stuff later.
+    Score ret = static_cast<i16>(
+        static_cast<i16>(pawns.popcount()) * SEE::value(PieceType::Pawn)
+        + static_cast<i16>(knights.popcount()) * SEE::value(PieceType::Knight)
+        + static_cast<i16>(bishops.popcount()) * SEE::value(PieceType::Bishop)
+        + static_cast<i16>(rooks.popcount()) * SEE::value(PieceType::Rook)
+        + static_cast<i16>(queens.popcount()) * SEE::value(PieceType::Queen));
+
+    // Push the king in a corner, and keep both kings close for mating.
+    ret += corner_bonus(weak_king);
+    ret += proximity_bonus(weak_king, strong_king);
+
+    // Return winning scores only if we enough material to mate already.
+    if (!rooks.empty() || !queens.empty() || (!knights.empty() && !bishops.empty())
+        || opposite_colored_bishops(pos) || knights.popcount() >= 3) {
+        ret += SCORE_VICTORY;
+    }
+
+    return ret;
 }
 
 template<Color color>
@@ -310,6 +385,12 @@ PScore evaluate_space(const Position& pos) {
 }
 
 Score evaluate_white_pov(const Position& pos, const PsqtState& psqt_state) {
+    if (is_kxk_endgame<Color::White>(pos)) {
+        return evaluate_kxk<Color::White>(pos);
+    } else if (is_kxk_endgame<Color::Black>(pos)) {
+        return -evaluate_kxk<Color::Black>(pos);
+    }
+
     const Color us    = pos.active_color();
     usize       phase = pos.piece_count(Color::White, PieceType::Knight)
                 + pos.piece_count(Color::Black, PieceType::Knight)
